@@ -10,7 +10,9 @@ import android.content.pm.PackageManager;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.provider.MediaStore;
 import android.view.KeyEvent;
+import android.webkit.GeolocationPermissions;
 import android.webkit.PermissionRequest;
 import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
@@ -19,35 +21,51 @@ import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.widget.EditText;
 
+import androidx.core.content.FileProvider;
+
+import java.io.File;
+import java.util.ArrayList;
+import java.util.List;
+
 public class MainActivity extends Activity {
 
     private static final String PREFS = "qiqi_prefs";
     private static final String KEY_URL = "server_url";
     private static final String DEFAULT_URL = "https://relatives-dpi-brunswick-committed.trycloudflare.com";
     private static final int FILE_CHOOSER_REQUEST = 100;
+    private static final int CAMERA_REQUEST = 101;
 
     private WebView webView;
     private ValueCallback<Uri[]> filePathCallback;
+    private Uri pendingCameraUri;
 
     @SuppressLint("SetJavaScriptEnabled")
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        if (Build.VERSION.SDK_INT >= 23
-                && checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
-            requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, 1);
+
+        // 一次申请：录音 + 相机 + 定位
+        if (Build.VERSION.SDK_INT >= 23) {
+            List<String> perms = new ArrayList<>();
+            if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) perms.add(Manifest.permission.RECORD_AUDIO);
+            if (checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) perms.add(Manifest.permission.CAMERA);
+            if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) perms.add(Manifest.permission.ACCESS_FINE_LOCATION);
+            if (!perms.isEmpty()) requestPermissions(perms.toArray(new String[0]), 1);
         }
+
         webView = new WebView(this);
         setContentView(webView);
+
         WebSettings s = webView.getSettings();
         s.setJavaScriptEnabled(true);
         s.setDomStorageEnabled(true);
         s.setMediaPlaybackRequiresUserGesture(false);
         s.setAllowFileAccess(true);
         s.setAllowContentAccess(true);
+        s.setGeolocationEnabled(true);
         s.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
         s.setCacheMode(WebSettings.LOAD_DEFAULT);
-        s.setUserAgentString(s.getUserAgentString() + " QiqiApp/1.0");
+        s.setUserAgentString(s.getUserAgentString() + " QiqiApp/1.1");
 
         webView.setWebViewClient(new WebViewClient());
         webView.setWebChromeClient(new WebChromeClient() {
@@ -61,10 +79,32 @@ public class MainActivity extends Activity {
                 });
             }
 
+            // 定位授权（H5 navigator.geolocation）
+            @Override
+            public void onGeolocationPermissionsShowPrompt(String origin, GeolocationPermissions.Callback callback) {
+                callback.invoke(origin, true, false);
+            }
+
+            // <input type="file">：capture=拍照 → 调相机；否则 → 相册
             @Override
             public boolean onShowFileChooser(WebView wv, ValueCallback<Uri[]> callback, FileChooserParams params) {
                 if (filePathCallback != null) filePathCallback.onReceiveValue(null);
                 filePathCallback = callback;
+                if (params.isCaptureEnabled()) {
+                    try {
+                        File photo = new File(getCacheDir(), "camera_" + System.currentTimeMillis() + ".jpg");
+                        pendingCameraUri = FileProvider.getUriForFile(MainActivity.this, getPackageName() + ".fileprovider", photo);
+                        Intent intent = new Intent(MediaStore.ACTION_IMAGE_CAPTURE);
+                        intent.putExtra(MediaStore.EXTRA_OUTPUT, pendingCameraUri);
+                        intent.addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION | Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                        startActivityForResult(intent, CAMERA_REQUEST);
+                        return true;
+                    } catch (Exception e) {
+                        filePathCallback = null;
+                        pendingCameraUri = null;
+                        return false;
+                    }
+                }
                 try {
                     Intent intent = new Intent(Intent.ACTION_GET_CONTENT);
                     intent.addCategory(Intent.CATEGORY_OPENABLE);
@@ -85,12 +125,21 @@ public class MainActivity extends Activity {
 
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
-        if (requestCode == FILE_CHOOSER_REQUEST) {
-            if (filePathCallback == null) return;
-            Uri[] result = null;
-            if (resultCode == RESULT_OK && data != null && data.getData() != null) result = new Uri[]{ data.getData() };
-            filePathCallback.onReceiveValue(result);
-            filePathCallback = null;
+        if (requestCode == CAMERA_REQUEST) {
+            if (filePathCallback != null) {
+                Uri[] result = null;
+                if (resultCode == RESULT_OK && pendingCameraUri != null) result = new Uri[]{ pendingCameraUri };
+                filePathCallback.onReceiveValue(result);
+                filePathCallback = null;
+            }
+            pendingCameraUri = null;
+        } else if (requestCode == FILE_CHOOSER_REQUEST) {
+            if (filePathCallback != null) {
+                Uri[] result = null;
+                if (resultCode == RESULT_OK && data != null && data.getData() != null) result = new Uri[]{ data.getData() };
+                filePathCallback.onReceiveValue(result);
+                filePathCallback = null;
+            }
         } else super.onActivityResult(requestCode, resultCode, data);
     }
 
